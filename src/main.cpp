@@ -164,7 +164,7 @@ struct Asteroid {
 
 // Global variables for rotation and movement
 glm::vec3 modelPosition = glm::vec3(0.0f, 0.0f, 0.0f);
-float rotationY = 0.0f; // Yaw rotation
+float rotationY = 0.0f; // Yaw rotations
 float movementSpeed = 0.05f;
 const float baseSpeed = 0.05f;
 const float speedBoostMultiplier = 5.0f;
@@ -180,6 +180,12 @@ int totalSpawns = 0;
 const int spawnInterval = 3;     // Seconds
 const int totalDuration = 10;    // Seconds
 const int maxSpawns = totalDuration / spawnInterval;
+
+// Variables for smooth camera transition
+glm::vec3 currentCameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f);
+glm::vec3 normalCameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f);
+glm::vec3 speedBoostCameraOffset = glm::vec3(-50.0f, 0.0f, 25.0f);
+float cameraTransitionSpeed = 5.0f; // Adjust for faster or slower transition
 
 // Function prototypes
 void processInput(GLFWwindow* window);
@@ -581,6 +587,10 @@ int main() {
         // Automatically move the spaceship along positive x-axis
         modelPosition.x += movementSpeed;
 
+        // Smooth camera transition
+        glm::vec3 targetCameraOffset = isSpeedBoostActive ? speedBoostCameraOffset : normalCameraOffset;
+        currentCameraOffset = glm::mix(currentCameraOffset, targetCameraOffset, cameraTransitionSpeed * (float)deltaTime);
+
         // First pass: Render scene to framebuffer
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
         glEnable(GL_DEPTH_TEST); // Enable depth testing
@@ -599,9 +609,8 @@ int main() {
         model = glm::translate(model, modelPosition);
 
         // Camera settings
-        glm::vec3 cameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f); // Camera behind the spaceship
         glm::vec3 target = glm::vec3(modelPosition.x, 0.0f, 0.0f); // static y & z axis
-        glm::vec3 cameraPos = cameraOffset + target;
+        glm::vec3 cameraPos = currentCameraOffset + target;
         glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
         glm::mat4 view = glm::lookAt(cameraPos, target, up);
 
@@ -738,20 +747,20 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-    // Constrain movement along z-axis between -15.0f and +15.0f
+    // Constrain movement along z-axis between -7.5f and +7.5f
     if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
-        if (modelPosition.z >= 15.0f){
-            // setting left boundary to 15.0f
-            return;
-        }
-        modelPosition.z += movementSpeed;
-    }
-    if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
-        if (modelPosition.z <= -15.0f){
-            // setting right boundary to -15.0f
+        if (modelPosition.z <= -7.5f){
+            // setting left boundary to -7.5f
             return;
         }
         modelPosition.z -= movementSpeed;
+    }
+    if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
+        if (modelPosition.z >= 7.5f){
+            // setting right boundary to 7.5f
+            return;
+        }
+        modelPosition.z += movementSpeed;
     }
 
     // Check for speed boost activation (Shift key)
