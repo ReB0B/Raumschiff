@@ -103,6 +103,59 @@ const char* axesFragmentShaderSource = R"glsl(
     }
 )glsl";
 
+// Vertex Shader Source for the post-processing shader
+const char* postProcessingVertexShaderSource = R"glsl(
+    #version 330 core
+    layout(location = 0) in vec2 aPos;
+    layout(location = 1) in vec2 aTexCoords;
+
+    out vec2 TexCoords;
+
+    void main() {
+        TexCoords = aTexCoords;
+        gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+)glsl";
+
+// Fragment Shader Source for the post-processing shader with chromatic aberration and vignette
+const char* postProcessingFragmentShaderSource = R"glsl(
+    #version 330 core
+    out vec4 FragColor;
+
+    in vec2 TexCoords;
+
+    uniform sampler2D screenTexture;
+    uniform bool isSpeedBoostActive;
+
+    void main() {
+        vec2 uv = TexCoords;
+        vec2 center = vec2(0.5, 0.5);
+
+        // Calculate distance from center (normalized to range [0,1])
+        float dist = distance(uv, center) / sqrt(0.5);
+
+        // Vignette effect using smoothstep for smooth transition
+        float vignette = smoothstep(1.0, 0.5, dist);
+
+        vec3 color;
+        if (isSpeedBoostActive) {
+            // Chromatic aberration effect
+            vec2 offset = (uv - center) * 0.02;
+            float r = texture(screenTexture, uv + offset).r;
+            float g = texture(screenTexture, uv).g;
+            float b = texture(screenTexture, uv - offset).b;
+            color = vec3(r, g, b);
+        } else {
+            color = texture(screenTexture, uv).rgb;
+        }
+
+        // Apply vignette effect
+        color *= vignette;
+
+        FragColor = vec4(color, 1.0);
+    }
+)glsl";
+
 // Struct to represent an asteroid
 struct Asteroid {
     glm::vec3 position;
@@ -112,8 +165,12 @@ struct Asteroid {
 // Global variables for rotation and movement
 glm::vec3 modelPosition = glm::vec3(0.0f, 0.0f, 0.0f);
 float rotationY = 0.0f; // Yaw rotation
-const float rotationSpeed = 0.01f;
-const float movementSpeed = 0.05f;
+float movementSpeed = 0.05f;
+const float baseSpeed = 0.05f;
+const float speedBoostMultiplier = 5.0f;
+
+// Global variables for speed boost
+bool isSpeedBoostActive = false;
 
 // Global variables for asteroids
 std::vector<Asteroid> asteroids;  // Vector to hold asteroid instances
@@ -144,7 +201,7 @@ int main() {
 #endif
 
     // Create window
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "3D Model Loader with Asteroids", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "3D Model Loader with Vignette and Chromatic Aberration", NULL, NULL);
     if (!window) {
         std::cerr << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
@@ -205,6 +262,26 @@ int main() {
 
     glDeleteShader(axesVertexShader);
     glDeleteShader(axesFragmentShader);
+
+    // Build and compile shaders for post-processing
+    unsigned int ppVertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(ppVertexShader, 1, &postProcessingVertexShaderSource, NULL);
+    glCompileShader(ppVertexShader);
+    checkGLError("Post-processing vertex shader compilation error");
+
+    unsigned int ppFragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(ppFragmentShader, 1, &postProcessingFragmentShaderSource, NULL);
+    glCompileShader(ppFragmentShader);
+    checkGLError("Post-processing fragment shader compilation error");
+
+    unsigned int ppShaderProgram = glCreateProgram();
+    glAttachShader(ppShaderProgram, ppVertexShader);
+    glAttachShader(ppShaderProgram, ppFragmentShader);
+    glLinkProgram(ppShaderProgram);
+    checkGLError("Post-processing shader program linking error");
+
+    glDeleteShader(ppVertexShader);
+    glDeleteShader(ppFragmentShader);
 
     // Load the spaceship model
     tinyobj::attrib_t attrib;
@@ -420,6 +497,66 @@ int main() {
     unsigned int viewLoc  = glGetUniformLocation(shaderProgram, "view");
     unsigned int projLoc  = glGetUniformLocation(shaderProgram, "projection");
 
+    // Setup framebuffer for post-processing
+    unsigned int framebuffer;
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+
+    // Create a texture to render to
+    unsigned int textureColorbuffer;
+    glGenTextures(1, &textureColorbuffer);
+    glBindTexture(GL_TEXTURE_2D, textureColorbuffer);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+    // Set texture parameters
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // Attach texture to framebuffer
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textureColorbuffer, 0);
+
+    // Create a renderbuffer object for depth and stencil attachment
+    unsigned int rbo;
+    glGenRenderbuffers(1, &rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    // Use a single renderbuffer object for both depth and stencil attachments
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, SCR_WIDTH, SCR_HEIGHT);
+    // Attach renderbuffer object to framebuffer
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
+
+    // Check if framebuffer is complete
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cerr << "Framebuffer not complete!" << std::endl;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Screen quad vertices for post-processing
+    float quadVertices[] = {
+        // Positions   // TexCoords
+        -1.0f,  1.0f,  0.0f, 1.0f, // Top-left
+        -1.0f, -1.0f,  0.0f, 0.0f, // Bottom-left
+         1.0f, -1.0f,  1.0f, 0.0f, // Bottom-right
+
+        -1.0f,  1.0f,  0.0f, 1.0f, // Top-left
+         1.0f, -1.0f,  1.0f, 0.0f, // Bottom-right
+         1.0f,  1.0f,  1.0f, 1.0f  // Top-right
+    };
+
+    // Setup screen VAO
+    unsigned int quadVAO, quadVBO;
+    glGenVertexArrays(1, &quadVAO);
+    glGenBuffers(1, &quadVBO);
+    glBindVertexArray(quadVAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+
+    // Position attribute
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    // TexCoord attribute
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    checkGLError("Screen quad setup error");
+
     // Timing variables
     startTime = glfwGetTime();
     double lastFrameTime = startTime;
@@ -434,11 +571,22 @@ int main() {
         // Input
         processInput(window);
 
+        // Update movement speed based on speed boost
+        if (isSpeedBoostActive) {
+            movementSpeed = baseSpeed * speedBoostMultiplier;
+        } else {
+            movementSpeed = baseSpeed;
+        }
+
         // Automatically move the spaceship along positive x-axis
         modelPosition.x += movementSpeed;
 
-        // Render
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        // First pass: Render scene to framebuffer
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glEnable(GL_DEPTH_TEST); // Enable depth testing
+
+        // Clear the framebuffer's content
+        glClearColor(0.0f, 0.0f, 0.1f, 1.0f); // Set background to dark blue (night sky)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         // Transformations for the spaceship
@@ -451,7 +599,7 @@ int main() {
         model = glm::translate(model, modelPosition);
 
         // Camera settings
-        glm::vec3 cameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f); // Adjust offsets as needed
+        glm::vec3 cameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f); // Camera behind the spaceship
         glm::vec3 target = glm::vec3(modelPosition.x, 0.0f, 0.0f); // static y & z axis
         glm::vec3 cameraPos = cameraOffset + target;
         glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
@@ -478,7 +626,7 @@ int main() {
         double elapsedTime = currentFrameTime - startTime;
         if (elapsedTime >= nextSpawnTime && totalSpawns < maxSpawns) {
             // Spawn new pair of asteroids ahead of the spaceship
-            float xPos = modelPosition.x + 50.0f + totalSpawns * 10.0f; // Spaced along x-axis ahead of spaceship
+            float xPos = modelPosition.x + 50.0f + totalSpawns * 10.0f; // Ahead of spaceship
             float yPos = modelPosition.y;
             float zOffset = 5.0f; // Offset from spaceship along z-axis
 
@@ -517,7 +665,7 @@ int main() {
         glUniform3fv(glGetUniformLocation(shaderProgram, "viewPos"), 1, glm::value_ptr(cameraPos));
 
         // Light and material properties
-        glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), 50.0f, 50.0f, 50.0f);
+        glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), modelPosition.x + 50.0f, 50.0f, 50.0f);
         glUniform3f(glGetUniformLocation(shaderProgram, "lightColor"), 1.0f, 1.0f, 1.0f);
         glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 0.6f, 0.6f, 0.6f);
 
@@ -530,7 +678,7 @@ int main() {
             glm::mat4 asteroidModel = glm::mat4(1.0f);
             asteroidModel = glm::translate(asteroidModel, asteroid.position);
 
-            // Rotate the asteroid by 90 degrees around the desired axis
+            // Rotate the asteroid by 90 degrees around the X-axis
             asteroidModel = glm::rotate(asteroidModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
 
             // Set the model matrix uniform for the asteroid
@@ -540,6 +688,24 @@ int main() {
             glBindVertexArray(asteroidVAO);
             glDrawElements(GL_TRIANGLES, asteroidIndices.size(), GL_UNSIGNED_INT, 0);
         }
+
+        // Second pass: Render to default framebuffer with post-processing
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDisable(GL_DEPTH_TEST); // Disable depth test so screen-space quad isn't discarded
+
+        // Clear the default framebuffer's content
+        glClearColor(0.0f, 0.0f, 0.1f, 1.0f); // Set background to dark blue (night sky)
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(ppShaderProgram);
+        glBindVertexArray(quadVAO);
+        glBindTexture(GL_TEXTURE_2D, textureColorbuffer); // Use the color attachment texture as the texture of the quad
+
+        // Set uniform for speed boost effect
+        glUniform1i(glGetUniformLocation(ppShaderProgram, "isSpeedBoostActive"), isSpeedBoostActive);
+
+        // Draw the quad
+        glDrawArrays(GL_TRIANGLES, 0, 6);
 
         // Swap buffers and poll IO events
         glfwSwapBuffers(window);
@@ -558,6 +724,11 @@ int main() {
     glDeleteBuffers(1, &asteroidVBO);
     glDeleteBuffers(1, &asteroidEBO);
 
+    // Delete framebuffer resources
+    glDeleteFramebuffers(1, &framebuffer);
+    glDeleteTextures(1, &textureColorbuffer);
+    glDeleteRenderbuffers(1, &rbo);
+
     glfwTerminate();
     return 0;
 }
@@ -569,18 +740,25 @@ void processInput(GLFWwindow* window) {
 
     // Constrain movement along z-axis between -15.0f and +15.0f
     if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
-        if (modelPosition.z >= 7.5f){
+        if (modelPosition.z >= 15.0f){
             // setting left boundary to 15.0f
             return;
         }
         modelPosition.z += movementSpeed;
     }
     if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
-        if (modelPosition.z <= -7.5f){
+        if (modelPosition.z <= -15.0f){
             // setting right boundary to -15.0f
             return;
         }
         modelPosition.z -= movementSpeed;
+    }
+
+    // Check for speed boost activation (Shift key)
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) {
+        isSpeedBoostActive = true;
+    } else {
+        isSpeedBoostActive = false;
     }
 }
 
