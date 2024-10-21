@@ -12,6 +12,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+using namespace std;
+
 const unsigned int SCR_WIDTH = 800;
 const unsigned int SCR_HEIGHT = 600;
 
@@ -54,7 +56,7 @@ const char* fragmentShaderSource = R"glsl(
         // Ambient
         float ambientStrength = 0.1;
         vec3 ambient = ambientStrength * lightColor;
-      	
+          
         // Diffuse 
         vec3 norm = normalize(Normal);
         vec3 lightDir = normalize(lightPos - FragPos);  
@@ -101,11 +103,26 @@ const char* axesFragmentShaderSource = R"glsl(
     }
 )glsl";
 
+// Struct to represent an asteroid
+struct Asteroid {
+    glm::vec3 position;
+    glm::vec3 velocity;
+};
+
 // Global variables for rotation and movement
 glm::vec3 modelPosition = glm::vec3(0.0f, 0.0f, 0.0f);
 float rotationY = 0.0f; // Yaw rotation
 const float rotationSpeed = 0.01f;
 const float movementSpeed = 0.05f;
+
+// Global variables for asteroids
+std::vector<Asteroid> asteroids;  // Vector to hold asteroid instances
+double startTime;
+double nextSpawnTime = 0.0;
+int totalSpawns = 0;
+const int spawnInterval = 3;     // Seconds
+const int totalDuration = 10;    // Seconds
+const int maxSpawns = totalDuration / spawnInterval;
 
 // Function prototypes
 void processInput(GLFWwindow* window);
@@ -127,7 +144,7 @@ int main() {
 #endif
 
     // Create window
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "3D Model Loader with Axes Visualization", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "3D Model Loader with Asteroids", NULL, NULL);
     if (!window) {
         std::cerr << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
@@ -189,7 +206,7 @@ int main() {
     glDeleteShader(axesVertexShader);
     glDeleteShader(axesFragmentShader);
 
-    // Load .obj file
+    // Load the spaceship model
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;
     std::vector<tinyobj::material_t> materials;
@@ -211,7 +228,7 @@ int main() {
         return -1;
     }
 
-    // Prepare vertex data for the model
+    // Prepare vertex data for the spaceship
     std::vector<float> vertices;
     std::vector<unsigned int> indices;
     for (size_t s = 0; s < shapes.size(); s++) {
@@ -250,13 +267,13 @@ int main() {
         }
     }
 
-    // Setup buffers and arrays for the model
+    // Setup buffers and arrays for the spaceship
     unsigned int VBO, VAO, EBO;
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
     glGenBuffers(1, &EBO);
 
-    // Bind buffers for the model
+    // Bind buffers for the spaceship
     glBindVertexArray(VAO);
 
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
@@ -273,7 +290,7 @@ int main() {
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
-    checkGLError("Vertex attribute setup error");
+    checkGLError("Spaceship vertex attribute setup error");
 
     // Prepare vertex data for the axes
     float axesVertices[] = {
@@ -312,21 +329,119 @@ int main() {
 
     checkGLError("Axes attribute setup error");
 
+    // Load the asteroid model
+    tinyobj::attrib_t asteroidAttrib;
+    std::vector<tinyobj::shape_t> asteroidShapes;
+    std::vector<tinyobj::material_t> asteroidMaterials;
+    std::string asteroidWarn, asteroidErr;
+
+    std::string asteroidInputfile = "./BlenderObjects/monkey.obj"; // Replace with your asteroid .obj file path
+    bool asteroidRet = tinyobj::LoadObj(&asteroidAttrib, &asteroidShapes, &asteroidMaterials, &asteroidWarn, &asteroidErr, asteroidInputfile.c_str());
+
+    if (!asteroidWarn.empty()) {
+        std::cout << "WARN: " << asteroidWarn << std::endl;
+    }
+
+    if (!asteroidErr.empty()) {
+        std::cerr << "ERR: " << asteroidErr << std::endl;
+    }
+
+    if (!asteroidRet) {
+        std::cerr << "Failed to load asteroid .obj file!" << std::endl;
+        return -1;
+    }
+
+    // Prepare vertex data for the asteroid
+    std::vector<float> asteroidVertices;
+    std::vector<unsigned int> asteroidIndices;
+    for (size_t s = 0; s < asteroidShapes.size(); s++) {
+        size_t index_offset = 0;
+        for (size_t f = 0; f < asteroidShapes[s].mesh.num_face_vertices.size(); f++) {
+            int fv = asteroidShapes[s].mesh.num_face_vertices[f];
+
+            // Process per-face
+            for (size_t v = 0; v < fv; v++) {
+                // Access vertex data
+                tinyobj::index_t idx = asteroidShapes[s].mesh.indices[index_offset + v];
+                tinyobj::real_t vx = asteroidAttrib.vertices[3 * idx.vertex_index + 0];
+                tinyobj::real_t vy = asteroidAttrib.vertices[3 * idx.vertex_index + 1];
+                tinyobj::real_t vz = asteroidAttrib.vertices[3 * idx.vertex_index + 2];
+
+                tinyobj::real_t nx = 0;
+                tinyobj::real_t ny = 0;
+                tinyobj::real_t nz = 0;
+                if (idx.normal_index >= 0) {
+                    nx = asteroidAttrib.normals[3 * idx.normal_index + 0];
+                    ny = asteroidAttrib.normals[3 * idx.normal_index + 1];
+                    nz = asteroidAttrib.normals[3 * idx.normal_index + 2];
+                }
+
+                // Append vertex data
+                asteroidVertices.push_back(vx);
+                asteroidVertices.push_back(vy);
+                asteroidVertices.push_back(vz);
+                asteroidVertices.push_back(nx);
+                asteroidVertices.push_back(ny);
+                asteroidVertices.push_back(nz);
+
+                asteroidIndices.push_back(asteroidIndices.size());
+            }
+            index_offset += fv;
+        }
+    }
+
+    // Setup buffers and arrays for the asteroid
+    unsigned int asteroidVBO, asteroidVAO, asteroidEBO;
+    glGenVertexArrays(1, &asteroidVAO);
+    glGenBuffers(1, &asteroidVBO);
+    glGenBuffers(1, &asteroidEBO);
+
+    // Bind buffers for the asteroid
+    glBindVertexArray(asteroidVAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, asteroidVBO);
+    glBufferData(GL_ARRAY_BUFFER, asteroidVertices.size() * sizeof(float), asteroidVertices.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, asteroidEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, asteroidIndices.size() * sizeof(unsigned int), asteroidIndices.data(), GL_STATIC_DRAW);
+
+    // Vertex positions
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    // Vertex normals
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    checkGLError("Asteroid vertex attribute setup error");
+
     // Get uniform locations for the model shader
     unsigned int modelLoc = glGetUniformLocation(shaderProgram, "model");
     unsigned int viewLoc  = glGetUniformLocation(shaderProgram, "view");
     unsigned int projLoc  = glGetUniformLocation(shaderProgram, "projection");
 
+    // Timing variables
+    startTime = glfwGetTime();
+    double lastFrameTime = startTime;
+
     // Main loop
     while (!glfwWindowShouldClose(window)) {
+        // Calculate deltaTime
+        double currentFrameTime = glfwGetTime();
+        double deltaTime = currentFrameTime - lastFrameTime;
+        lastFrameTime = currentFrameTime;
+
         // Input
         processInput(window);
+
+        // Automatically move the spaceship along positive x-axis
+        modelPosition.x += movementSpeed;
 
         // Render
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Transformations for the model
+        // Transformations for the spaceship
         glm::mat4 model = glm::mat4(1.0f);
 
         // Rotate to make Z-axis point up
@@ -335,13 +450,10 @@ int main() {
         // Apply translation based on modelPosition
         model = glm::translate(model, modelPosition);
 
-        // Apply rotation around new Y-axis (previously Z-axis)
-        model = glm::rotate(model, rotationY, glm::vec3(0.0f, 0.0f, 1.0f));
-
         // Camera settings
-        glm::vec3 cameraOffset = glm::vec3(30.0f, 0.0f, 15.0f); // Adjust offsets as needed
-        glm::vec3 cameraPos = modelPosition + cameraOffset;
-        glm::vec3 target = modelPosition;
+        glm::vec3 cameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f); // Adjust offsets as needed
+        glm::vec3 target = glm::vec3(modelPosition.x, 0.0f, 0.0f); // static y & z axis
+        glm::vec3 cameraPos = cameraOffset + target;
         glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
         glm::mat4 view = glm::lookAt(cameraPos, target, up);
 
@@ -362,7 +474,38 @@ int main() {
         // Draw the axes
         glDrawArrays(GL_LINES, 0, 6);
 
-        // Render the model
+        // Spawn asteroids every 3 seconds for 10 seconds
+        double elapsedTime = currentFrameTime - startTime;
+        if (elapsedTime >= nextSpawnTime && totalSpawns < maxSpawns) {
+            // Spawn new pair of asteroids ahead of the spaceship
+            float xPos = modelPosition.x + 50.0f + totalSpawns * 10.0f; // Spaced along x-axis ahead of spaceship
+            float yPos = modelPosition.y;
+            float zOffset = 5.0f; // Offset from spaceship along z-axis
+
+            // Create left asteroid
+            Asteroid leftAsteroid;
+            leftAsteroid.position = glm::vec3(xPos, yPos, modelPosition.z - zOffset);
+            leftAsteroid.velocity = glm::vec3(-movementSpeed, 0.0f, 0.0f); // Moving towards negative x
+
+            // Create right asteroid
+            Asteroid rightAsteroid;
+            rightAsteroid.position = glm::vec3(xPos, yPos, modelPosition.z + zOffset);
+            rightAsteroid.velocity = glm::vec3(-movementSpeed, 0.0f, 0.0f); // Moving towards negative x
+
+            asteroids.push_back(leftAsteroid);
+            asteroids.push_back(rightAsteroid);
+
+            // Update nextSpawnTime and totalSpawns
+            nextSpawnTime += spawnInterval;
+            totalSpawns++;
+        }
+
+        // Update asteroid positions
+        for (auto& asteroid : asteroids) {
+            asteroid.position += asteroid.velocity;
+        }
+
+        // Render the spaceship
         glUseProgram(shaderProgram);
 
         // Set uniforms for the model shader
@@ -378,9 +521,25 @@ int main() {
         glUniform3f(glGetUniformLocation(shaderProgram, "lightColor"), 1.0f, 1.0f, 1.0f);
         glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 0.6f, 0.6f, 0.6f);
 
-        // Render the model
+        // Render the spaceship
         glBindVertexArray(VAO);
         glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_INT, 0);
+
+        // Render the asteroids
+        for (auto& asteroid : asteroids) {
+            glm::mat4 asteroidModel = glm::mat4(1.0f);
+            asteroidModel = glm::translate(asteroidModel, asteroid.position);
+
+            // Rotate the asteroid by 90 degrees around the desired axis
+            asteroidModel = glm::rotate(asteroidModel, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+
+            // Set the model matrix uniform for the asteroid
+            glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(asteroidModel));
+
+            // Render the asteroid
+            glBindVertexArray(asteroidVAO);
+            glDrawElements(GL_TRIANGLES, asteroidIndices.size(), GL_UNSIGNED_INT, 0);
+        }
 
         // Swap buffers and poll IO events
         glfwSwapBuffers(window);
@@ -395,6 +554,10 @@ int main() {
     glDeleteVertexArrays(1, &axesVAO);
     glDeleteBuffers(1, &axesVBO);
 
+    glDeleteVertexArrays(1, &asteroidVAO);
+    glDeleteBuffers(1, &asteroidVBO);
+    glDeleteBuffers(1, &asteroidEBO);
+
     glfwTerminate();
     return 0;
 }
@@ -404,29 +567,22 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-    // Calculate forward vector based on current rotation
-    glm::vec3 forward = glm::vec3(-cos(rotationY), -sin(rotationY), 0.0f);
-    glm::vec3 right = glm::vec3(-forward.y, forward.x, 0.0f); // Right vector is perpendicular to forward
-
-    // Forward/backward movement
-    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
-        modelPosition += forward * movementSpeed;
-    }
-    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) {
-        modelPosition -= forward * movementSpeed;
-    }
-
-    // Left/right strafing movement
+    // Constrain movement along z-axis between -15.0f and +15.0f
     if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
-        modelPosition -= right * movementSpeed;
+        if (modelPosition.z >= 7.5f){
+            // setting left boundary to 15.0f
+            return;
+        }
+        modelPosition.z += movementSpeed;
     }
     if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
-        modelPosition += right * movementSpeed;
+        if (modelPosition.z <= -7.5f){
+            // setting right boundary to -15.0f
+            return;
+        }
+        modelPosition.z -= movementSpeed;
     }
 }
-
-
-
 
 // Function to check for OpenGL errors
 void checkGLError(const std::string& errorMessage) {
