@@ -11,6 +11,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+// GLM random functionality
+#include <glm/gtc/random.hpp>
 
 using namespace std;
 
@@ -156,18 +158,57 @@ const char* postProcessingFragmentShaderSource = R"glsl(
     }
 )glsl";
 
+// Vertex Shader Source for the stars
+const char* starVertexShaderSource = R"glsl(
+    #version 330 core
+    layout(location = 0) in vec3 aPos;
+    layout(location = 1) in float aPhase;
+
+    out float vPhase;
+
+    uniform mat4 view;
+    uniform mat4 projection;
+
+    void main() {
+        vPhase = aPhase;
+        gl_Position = projection * view * vec4(aPos, 1.0);
+        gl_PointSize = 2.0; // Adjust size as needed
+    }
+)glsl";
+
+// Fragment Shader Source for the stars
+const char* starFragmentShaderSource = R"glsl(
+    #version 330 core
+    in float vPhase;
+    out vec4 FragColor;
+
+    uniform float time;
+
+    void main() {
+        // Twinkling effect
+        float brightness = 0.5 + 0.5 * sin(time * 5.0 + vPhase);
+        FragColor = vec4(vec3(brightness), 1.0);
+    }
+)glsl";
+
 // Struct to represent an asteroid
 struct Asteroid {
     glm::vec3 position;
     glm::vec3 velocity;
 };
 
+// Struct to represent a star
+struct Star {
+    glm::vec3 position;
+    float phase;
+};
+
 // Global variables for rotation and movement
 glm::vec3 modelPosition = glm::vec3(0.0f, 0.0f, 0.0f);
-float rotationY = 0.0f; // Yaw rotations
+float rotationY = 0.0f; // Yaw rotation
 float movementSpeed = 0.05f;
 const float baseSpeed = 0.05f;
-const float speedBoostMultiplier = 5.0f;
+const float speedBoostMultiplier = 2.0f;
 
 // Global variables for speed boost
 bool isSpeedBoostActive = false;
@@ -176,10 +217,7 @@ bool isSpeedBoostActive = false;
 std::vector<Asteroid> asteroids;  // Vector to hold asteroid instances
 double startTime;
 double nextSpawnTime = 0.0;
-int totalSpawns = 0;
 const int spawnInterval = 3;     // Seconds
-const int totalDuration = 10;    // Seconds
-const int maxSpawns = totalDuration / spawnInterval;
 
 // Variables for smooth camera transition
 glm::vec3 currentCameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f);
@@ -187,9 +225,16 @@ glm::vec3 normalCameraOffset = glm::vec3(-30.0f, 0.0f, 15.0f);
 glm::vec3 speedBoostCameraOffset = glm::vec3(-50.0f, 0.0f, 25.0f);
 float cameraTransitionSpeed = 5.0f; // Adjust for faster or slower transition
 
+// Global variables for stars
+std::vector<Star> stars;
+unsigned int starsVAO, starsVBO;
+glm::vec3 lastStarGenPosition = glm::vec3(0.0f);
+
 // Function prototypes
 void processInput(GLFWwindow* window);
 void checkGLError(const std::string& errorMessage);
+void generateStars(int numStars, float radius, glm::vec3 centerPosition);
+void setupStars();
 
 int main() {
     // Initialize GLFW
@@ -207,7 +252,7 @@ int main() {
 #endif
 
     // Create window
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "3D Model Loader with Vignette and Chromatic Aberration", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "3D Model Loader with Stars, Vignette, and Chromatic Aberration", NULL, NULL);
     if (!window) {
         std::cerr << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
@@ -228,6 +273,9 @@ int main() {
 
     // Enable depth testing
     glEnable(GL_DEPTH_TEST);
+
+    // Enable program point size
+    glEnable(GL_PROGRAM_POINT_SIZE);
 
     // Build and compile shaders for the model
     unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
@@ -288,6 +336,26 @@ int main() {
 
     glDeleteShader(ppVertexShader);
     glDeleteShader(ppFragmentShader);
+
+    // Build and compile shaders for the stars
+    unsigned int starVertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(starVertexShader, 1, &starVertexShaderSource, NULL);
+    glCompileShader(starVertexShader);
+    checkGLError("Star vertex shader compilation error");
+
+    unsigned int starFragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(starFragmentShader, 1, &starFragmentShaderSource, NULL);
+    glCompileShader(starFragmentShader);
+    checkGLError("Star fragment shader compilation error");
+
+    unsigned int starShaderProgram = glCreateProgram();
+    glAttachShader(starShaderProgram, starVertexShader);
+    glAttachShader(starShaderProgram, starFragmentShader);
+    glLinkProgram(starShaderProgram);
+    checkGLError("Star shader program linking error");
+
+    glDeleteShader(starVertexShader);
+    glDeleteShader(starFragmentShader);
 
     // Load the spaceship model
     tinyobj::attrib_t attrib;
@@ -563,6 +631,14 @@ int main() {
 
     checkGLError("Screen quad setup error");
 
+    // Generate stars
+    int numStars = 1000; // Number of stars
+    float starFieldRadius = 500.0f; // Increased radius
+    glm::vec3 cameraPos = currentCameraOffset + modelPosition; // Initial camera position
+    generateStars(numStars, starFieldRadius, cameraPos);
+    setupStars();
+    lastStarGenPosition = cameraPos;
+
     // Timing variables
     startTime = glfwGetTime();
     double lastFrameTime = startTime;
@@ -591,6 +667,20 @@ int main() {
         glm::vec3 targetCameraOffset = isSpeedBoostActive ? speedBoostCameraOffset : normalCameraOffset;
         currentCameraOffset = glm::mix(currentCameraOffset, targetCameraOffset, cameraTransitionSpeed * (float)deltaTime);
 
+        // Camera settings
+        glm::vec3 target = glm::vec3(modelPosition.x, 0.0f, 0.0f); // static y & z axis
+        cameraPos = currentCameraOffset + target;
+        glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
+        glm::mat4 view = glm::lookAt(cameraPos, target, up);
+
+        // Update star field if camera has moved significantly
+        float distanceMoved = glm::length(cameraPos - lastStarGenPosition);
+        if (distanceMoved > starFieldRadius / 2) {
+            generateStars(numStars, starFieldRadius, cameraPos);
+            setupStars();
+            lastStarGenPosition = cameraPos;
+        }
+
         // First pass: Render scene to framebuffer
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
         glEnable(GL_DEPTH_TEST); // Enable depth testing
@@ -608,16 +698,38 @@ int main() {
         // Apply translation based on modelPosition
         model = glm::translate(model, modelPosition);
 
-        // Camera settings
-        glm::vec3 target = glm::vec3(modelPosition.x, 0.0f, 0.0f); // static y & z axis
-        glm::vec3 cameraPos = currentCameraOffset + target;
-        glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
-        glm::mat4 view = glm::lookAt(cameraPos, target, up);
-
         // Projection
         glm::mat4 projection = glm::perspective(glm::radians(45.0f),
                                                 (float)SCR_WIDTH / (float)SCR_HEIGHT,
-                                                0.1f, 100.0f);
+                                                0.1f, 1000.0f);
+
+        // Render the stars
+        glUseProgram(starShaderProgram);
+
+        // Pass view and projection matrices
+        glUniformMatrix4fv(glGetUniformLocation(starShaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(starShaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+
+        // Pass time uniform
+        float timeValue = glfwGetTime();
+        glUniform1f(glGetUniformLocation(starShaderProgram, "time"), timeValue);
+
+        // Disable depth testing so stars are always in the background
+        glDisable(GL_DEPTH_TEST);
+
+        // Enable blending for smoother star appearance
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        glBindVertexArray(starsVAO);
+        glDrawArrays(GL_POINTS, 0, stars.size());
+        glBindVertexArray(0);
+
+        // Re-enable depth testing
+        glEnable(GL_DEPTH_TEST);
+
+        // Disable blending
+        glDisable(GL_BLEND);
 
         // Render the axes
         glUseProgram(axesShaderProgram);
@@ -631,11 +743,11 @@ int main() {
         // Draw the axes
         glDrawArrays(GL_LINES, 0, 6);
 
-        // Spawn asteroids every 3 seconds for 10 seconds
+        // Spawn asteroids at regular intervals
         double elapsedTime = currentFrameTime - startTime;
-        if (elapsedTime >= nextSpawnTime && totalSpawns < maxSpawns) {
+        if (elapsedTime >= nextSpawnTime) {
             // Spawn new pair of asteroids ahead of the spaceship
-            float xPos = modelPosition.x + 50.0f + totalSpawns * 10.0f; // Ahead of spaceship
+            float xPos = modelPosition.x + 50.0f; // Ahead of spaceship
             float yPos = modelPosition.y;
             float zOffset = 5.0f; // Offset from spaceship along z-axis
 
@@ -652,15 +764,20 @@ int main() {
             asteroids.push_back(leftAsteroid);
             asteroids.push_back(rightAsteroid);
 
-            // Update nextSpawnTime and totalSpawns
+            // Update nextSpawnTime
             nextSpawnTime += spawnInterval;
-            totalSpawns++;
         }
 
         // Update asteroid positions
         for (auto& asteroid : asteroids) {
             asteroid.position += asteroid.velocity;
         }
+
+        // Remove asteroids that are far behind the spaceship
+        asteroids.erase(std::remove_if(asteroids.begin(), asteroids.end(),
+            [&](const Asteroid& asteroid) {
+                return asteroid.position.x < modelPosition.x - 50.0f; // Adjust the threshold as needed
+            }), asteroids.end());
 
         // Render the spaceship
         glUseProgram(shaderProgram);
@@ -676,7 +793,9 @@ int main() {
         // Light and material properties
         glUniform3f(glGetUniformLocation(shaderProgram, "lightPos"), modelPosition.x + 50.0f, 50.0f, 50.0f);
         glUniform3f(glGetUniformLocation(shaderProgram, "lightColor"), 1.0f, 1.0f, 1.0f);
-        glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 0.6f, 0.6f, 0.6f);
+
+        // Set the spaceship color to white
+        glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 1.0f, 1.0f, 1.0f);
 
         // Render the spaceship
         glBindVertexArray(VAO);
@@ -692,6 +811,9 @@ int main() {
 
             // Set the model matrix uniform for the asteroid
             glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(asteroidModel));
+
+            // Set the asteroid color to light grey
+            glUniform3f(glGetUniformLocation(shaderProgram, "objectColor"), 0.8f, 0.8f, 0.8f);
 
             // Render the asteroid
             glBindVertexArray(asteroidVAO);
@@ -732,6 +854,9 @@ int main() {
     glDeleteVertexArrays(1, &asteroidVAO);
     glDeleteBuffers(1, &asteroidVBO);
     glDeleteBuffers(1, &asteroidEBO);
+
+    glDeleteVertexArrays(1, &starsVAO);
+    glDeleteBuffers(1, &starsVBO);
 
     // Delete framebuffer resources
     glDeleteFramebuffers(1, &framebuffer);
@@ -777,4 +902,59 @@ void checkGLError(const std::string& errorMessage) {
     while ((err = glGetError()) != GL_NO_ERROR) {
         std::cerr << errorMessage << ": OpenGL error: " << err << std::endl;
     }
+}
+
+// Function to generate star positions
+void generateStars(int numStars, float radius, glm::vec3 centerPosition) {
+    stars.clear();
+    for (int i = 0; i < numStars; ++i) {
+        // Random direction
+        float theta = glm::linearRand(0.0f, glm::two_pi<float>());
+        float phi = glm::linearRand(0.0f, glm::pi<float>());
+
+        // Random radius within a range to create a shell
+        float r = glm::linearRand(radius * 0.9f, radius);
+
+        // Spherical to Cartesian conversion
+        float x = r * sin(phi) * cos(theta);
+        float y = r * sin(phi) * sin(theta);
+        float z = r * cos(phi);
+
+        // Random phase for twinkling variation
+        float phase = glm::linearRand(0.0f, glm::two_pi<float>());
+
+        // Shift stars to be around the centerPosition
+        stars.push_back({glm::vec3(x, y, z) + centerPosition, phase});
+    }
+}
+
+// Function to setup stars VAO and VBO
+void setupStars() {
+    struct StarVertex {
+        glm::vec3 position;
+        float phase;
+    };
+
+    // Convert stars to StarVertex vector
+    std::vector<StarVertex> starVertices;
+    for (const auto& star : stars) {
+        starVertices.push_back({star.position, star.phase});
+    }
+
+    glGenVertexArrays(1, &starsVAO);
+    glGenBuffers(1, &starsVBO);
+
+    glBindVertexArray(starsVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, starsVBO);
+    glBufferData(GL_ARRAY_BUFFER, starVertices.size() * sizeof(StarVertex), &starVertices[0], GL_STATIC_DRAW);
+
+    // Position attribute
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(StarVertex), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    // Phase attribute
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, sizeof(StarVertex), (void*)offsetof(StarVertex, phase));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
 }
